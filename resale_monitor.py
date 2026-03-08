@@ -196,48 +196,47 @@ class MercariAPI:
         self.seen_ids = set()
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept": "application/json",
-            "X-Platform": "web",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ja-JP,ja;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
         })
 
     def search(self, keyword_encoded, label):
         products = []
         try:
-            url = (
-                "https://api.mercari.jp/v2/entities:search"
-                "?pageSize=30"
-                "&searchSessionId=monitor"
-                "&indexRouting=INDEX_ROUTING_UNSPECIFIED"
-                "&searchCondition.keyword=" + keyword_encoded +
-                "&searchCondition.status=STATUS_ON_SALE"
-                "&searchCondition.sort=SORT_CREATED_TIME"
-                "&searchCondition.order=ORDER_DESC"
-            )
+            url = "https://jp.mercari.com/search?keyword=" + keyword_encoded + "&status=on_sale&sort=created_time&order=desc"
             res = self.session.get(url, timeout=15)
             if res.status_code != 200:
-                print("API error: " + str(res.status_code) + " [" + label + "]")
+                print("  HTTP error: " + str(res.status_code) + " [" + label + "]")
                 return []
-            data = res.json()
-            items = data.get("items", [])
-            for item in items:
-                pid = item.get("id", "")
-                if not pid or pid in self.seen_ids:
+
+            import re
+            pattern = r'"id":"(m\d+)".*?"name":"([^"]+)".*?"price":(\d+)'
+            matches = re.findall(pattern, res.text)
+
+            for pid, title, price_str in matches[:20]:
+                if pid in self.seen_ids:
                     continue
-                price = int(item.get("price", 0))
+                price = int(price_str)
                 if price <= 0:
                     continue
-                title = item.get("name", "")
-                thumbnail = item.get("thumbnails", [""])[0] if item.get("thumbnails") else ""
                 products.append(Product(
-                    id=pid, title=title, price=price,
+                    id=pid,
+                    title=title,
+                    price=price,
                     url="https://jp.mercari.com/item/" + pid,
-                    thumbnail=thumbnail, posted_at=datetime.now(),
+                    thumbnail="",
+                    posted_at=datetime.now(),
+                    created_seconds_ago=9999,
                 ))
                 self.seen_ids.add(pid)
+
         except Exception as e:
-            print("Search error [" + label + "]: " + str(e))
+            print("  Search error [" + label + "]: " + str(e))
         return products
+
+res =
 
 
 class ResaleMonitor:
