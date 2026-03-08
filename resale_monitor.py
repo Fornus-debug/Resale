@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import re
 from datetime import datetime
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -15,16 +16,12 @@ CONFIG = {
     "min_profit":         8000,
     "mercari_fee_rate":   0.10,
     "keywords": [
-        "%E3%82%B8%E3%83%A3%E3%83%B3%E3%82%AF",
-        "%E7%94%BB%E9%9D%A2%E5%89%B2%E3%82%8C",
-        "%E9%9B%BB%E6%BA%90%E5%85%A5%E3%82%89%E3%81%AA%E3%81%84",
-        "%E9%83%A8%E5%93%81%E5%8F%96%E3%82%8A",
-        "%E8%B5%B7%E5%8B%95%E4%B8%8D%E5%8F%AF",
-        "%E6%B0%B4%E6%B2%A1",
-    ],
-    "keyword_labels": [
-        "junk", "screen-crack", "no-power",
-        "parts", "no-boot", "water",
+        "ジャンク iPhone",
+        "画面割れ iPhone",
+        "電源入らない iPhone",
+        "部品取り iPhone",
+        "起動不可 iPhone",
+        "水没 iPhone",
     ],
     "priority_models": ["iPhone 11", "iPhone 12", "iPhone 13"],
 }
@@ -64,6 +61,7 @@ class ROIResult:
     profit: int
     roi: float
     risk_level: str
+    priority_score: float
     issues: list = field(default_factory=list)
 
 
@@ -81,13 +79,13 @@ class ROIEngine:
         total = 0
         issues = []
         checks = [
-            ("screen", "screen crack", 6000),
-            ("water",  "water damage", 3000),
-            ("power",  "no power",     4000),
-            ("boot",   "no boot",      4000),
-            ("batt",   "battery",      3500),
-            ("charg",  "charge issue", 2000),
-            ("camera", "camera",       5000),
+            ("screen",  "screen crack", 6000),
+            ("water",   "water damage", 3000),
+            ("power",   "no power",     4000),
+            ("boot",    "no boot",      4000),
+            ("batt",    "battery",      3500),
+            ("charg",   "charge",       2000),
+            ("camera",  "camera",       5000),
         ]
         for key, label, cost in checks:
             if key in text:
@@ -95,7 +93,7 @@ class ROIEngine:
                 issues.append(label + "(Y" + str(cost) + ")")
         if len(issues) >= 3:
             total = int(total * 1.3)
-            issues.append("multi-fault x1.3")
+            issues.append("multi x1.3")
         if total == 0:
             total = 5000
             issues.append("unknown(Y5000)")
@@ -110,16 +108,19 @@ class ROIEngine:
         mercari_fee = int(sell_price * CONFIG["mercari_fee_rate"])
         profit = sell_price - product.price - repair_cost - mercari_fee
         roi = (profit / product.price * 100) if product.price > 0 else 0
-        if roi >= 60:
-            risk_level = "LOW"
-        elif roi >= 40:
-            risk_level = "MID"
-        else:
-            risk_level = "HIGH"
+        if roi >= 60:   risk_level = "LOW"
+        elif roi >= 40: risk_level = "MID"
+        else:           risk_level = "HIGH"
+        priority_score = (roi * 0.6) + (profit / 1000 * 0.4)
+        for pm in CONFIG["priority_models"]:
+            if pm.lower() in product.title.lower():
+                priority_score *= 1.2
+                break
         return ROIResult(
             product=product, model_name=model_name, sell_price=sell_price,
             repair_cost=repair_cost, mercari_fee=mercari_fee,
-            profit=profit, roi=round(roi, 1), risk_level=risk_level, issues=issues,
+            profit=profit, roi=round(roi, 1), risk_level=risk_level,
+            priority_score=round(priority_score, 2), issues=issues,
         )
 
     def is_worth_notifying(self, result):
@@ -147,9 +148,7 @@ class DiscordNotifier:
         return 0xFF6B35
 
     def send_alert(self, result):
-        if not self.webhook_url:
-            return False
-        if not self.can_notify():
+        if not self.webhook_url or not self.can_notify():
             return False
         p = result.product
         embed = {
@@ -163,11 +162,11 @@ class DiscordNotifier:
                 {"name": "Buy Price",  "value": "Y" + str(p.price),             "inline": True},
                 {"name": "Model",      "value": result.model_name,              "inline": True},
                 {"name": "Sell Est",   "value": "Y" + str(result.sell_price),   "inline": True},
-                {"name": "Repair Est", "value": "Y" + str(result.repair_cost),  "inline": True},
+                {"name": "Repair",     "value": "Y" + str(result.repair_cost),  "inline": True},
                 {"name": "Risk",       "value": result.risk_level,              "inline": True},
                 {"name": "Issues",     "value": ", ".join(result.issues),       "inline": False},
             ],
-            "footer": {"text": "Resale Monitor | " + datetime.now().strftime("%H:%M:%S")},
+            "footer": {"text": "Resale Monitor | " + datetime.now().strftime("%H:%M:%S") + " | " + str(self.today_count+1) + "/" + str(CONFIG["daily_notify_limit"])},
         }
         if p.thumbnail:
             embed["thumbnail"] = {"url": p.thumbnail}
@@ -175,11 +174,11 @@ class DiscordNotifier:
             res = requests.post(self.webhook_url, json={"embeds": [embed]}, timeout=10)
             if res.status_code in (200, 204):
                 self.today_count += 1
-                print("Sent #" + str(self.today_count) + " ROI:" + str(result.roi) + "%")
+                print("  Sent #" + str(self.today_count) + " ROI:" + str(result.roi) + "%")
                 return True
             return False
         except Exception as e:
-            print("Discord error: " + str(e))
+            print("  Discord error: " + str(e))
             return False
 
     def send_message(self, text):
@@ -191,65 +190,90 @@ class DiscordNotifier:
             pass
 
 
-class MercariAPI:
+class MercariScraper:
     def __init__(self):
         self.seen_ids = set()
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "ja-JP,ja;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-        })
 
-    def search(self, keyword_encoded, label):
+    def search(self, keyword, label):
         products = []
         try:
-            url = "https://jp.mercari.com/search?keyword=" + keyword_encoded + "&status=on_sale&sort=created_time&order=desc"
-            res = self.session.get(url, timeout=15)
+            encoded = requests.utils.quote(keyword)
+            url = "https://mercari-searches.com/search?keyword=" + encoded + "&sort=created_time&order=desc&status=on_sale"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            }
+            res = requests.get(url, headers=headers, timeout=15)
+
             if res.status_code != 200:
-                print("  HTTP error: " + str(res.status_code) + " [" + label + "]")
-                return []
+                # フォールバック: 別のエンドポイント試行
+                return self._search_fallback(keyword, label)
 
-            import re
-            pattern = r'"id":"(m\d+)".*?"name":"([^"]+)".*?"price":(\d+)'
-            matches = re.findall(pattern, res.text)
+            ids = re.findall(r'm\d{10,}', res.text)
+            titles = re.findall(r'"name"\s*:\s*"([^"]{5,80})"', res.text)
+            prices = re.findall(r'"price"\s*:\s*(\d+)', res.text)
 
-            for pid, title, price_str in matches[:20]:
+            for i in range(min(len(ids), len(titles), len(prices), 20)):
+                pid = ids[i]
                 if pid in self.seen_ids:
                     continue
-                price = int(price_str)
+                price = int(prices[i])
                 if price <= 0:
                     continue
                 products.append(Product(
-                    id=pid,
-                    title=title,
-                    price=price,
+                    id=pid, title=titles[i], price=price,
                     url="https://jp.mercari.com/item/" + pid,
-                    thumbnail="",
-                    posted_at=datetime.now(),
-                    created_seconds_ago=9999,
+                    thumbnail="", posted_at=datetime.now(),
                 ))
                 self.seen_ids.add(pid)
 
         except Exception as e:
             print("  Search error [" + label + "]: " + str(e))
+            return self._search_fallback(keyword, label)
         return products
 
-res =
+    def _search_fallback(self, keyword, label):
+        products = []
+        try:
+            encoded = requests.utils.quote(keyword)
+            url = "https://jp.mercari.com/search?keyword=" + encoded + "&status=on_sale&sort=created_time&order=desc"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                "Accept-Language": "ja",
+            }
+            res = requests.get(url, headers=headers, timeout=15)
+            ids = re.findall(r'"id":"(m\d+)"', res.text)
+            titles = re.findall(r'"name":"([^"]{5,80})"', res.text)
+            prices = re.findall(r'"price":(\d{3,6})', res.text)
+
+            for i in range(min(len(ids), len(titles), len(prices), 20)):
+                pid = ids[i]
+                if pid in self.seen_ids:
+                    continue
+                price = int(prices[i])
+                if price <= 0:
+                    continue
+                products.append(Product(
+                    id=pid, title=titles[i], price=price,
+                    url="https://jp.mercari.com/item/" + pid,
+                    thumbnail="", posted_at=datetime.now(),
+                ))
+                self.seen_ids.add(pid)
+            print("  [fallback] " + label + " " + str(len(products)) + " items")
+        except Exception as e:
+            print("  Fallback error [" + label + "]: " + str(e))
+        return products
 
 
 class ResaleMonitor:
     def __init__(self):
         self.roi_engine = ROIEngine()
         self.discord = DiscordNotifier(CONFIG["discord_webhook"])
-        self.api = MercariAPI()
+        self.scraper = MercariScraper()
         self.today_results = []
 
     def run(self):
         print("Resale Monitor Starting...")
         print("Interval: " + str(CONFIG["scan_interval"]) + "s")
-        print("Min ROI: " + str(CONFIG["min_roi"]) + "%")
         self.discord.send_message(
             "Resale Monitor Started\n"
             + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -268,20 +292,18 @@ class ResaleMonitor:
         now = datetime.now().strftime("%H:%M:%S")
         print("[" + now + "] Scanning...")
         candidates = []
-        keywords = CONFIG["keywords"]
-        labels = CONFIG["keyword_labels"]
-        for i in range(len(keywords)):
-            products = self.api.search(keywords[i], labels[i])
-            print("  [" + labels[i] + "] " + str(len(products)) + " new items")
+        for kw in CONFIG["keywords"]:
+            label = kw.split()[0]
+            products = self.scraper.search(kw, label)
+            print("  [" + label + "] " + str(len(products)) + " items")
             for p in products:
                 result = self.roi_engine.calculate(p)
                 if self.roi_engine.is_worth_notifying(result):
                     candidates.append(result)
-        candidates.sort(key=lambda r: r.roi, reverse=True)
+        candidates.sort(key=lambda r: r.priority_score, reverse=True)
         print("Candidates: " + str(len(candidates)))
         for r in candidates:
-            sent = self.discord.send_alert(r)
-            if sent:
+            if self.discord.send_alert(r):
                 self.today_results.append(r)
             if not self.discord.can_notify():
                 break
