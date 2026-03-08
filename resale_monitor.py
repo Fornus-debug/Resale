@@ -318,4 +318,75 @@ class MercariScraper:
                     if not pid or pid in self.seen_ids:
                         continue
                     title_el = await item.query_selector('[data-testid="item-name"]')
-                    title = await title_el.inner​​​​​​​​​​​​​​​​
+                    title = await title_el.inner_text() if title_el else ""
+                    price_el = await item.query_selector('[data-testid="price"]')
+                    price_text = await price_el.inner_text() if price_el else "0"
+                    price = int(price_text.replace("Y", "").replace(",", "").strip()) if price_el else 0
+                    img = await item.query_selector("img")
+                    thumbnail = await img.get_attribute("src") if img else ""
+                    products.append(Product(
+                        id=pid, title=title, price=price,
+                        url="https://jp.mercari.com" + href,
+                        thumbnail=thumbnail, posted_at=datetime.now(),
+                    ))
+                    self.seen_ids.add(pid)
+                except Exception:
+                    continue
+        except Exception as e:
+            print("Search error [" + keyword + "]: " + str(e))
+        return products
+
+
+class ResaleMonitor:
+    def __init__(self):
+        self.roi_engine = ROIEngine()
+        self.discord = DiscordNotifier(CONFIG["discord_webhook"])
+        self.scraper = MercariScraper()
+        self.today_results = []
+
+    async def run(self):
+        print("Resale Monitor Starting...")
+        print("Interval: " + str(CONFIG["scan_interval"]) + "s")
+        print("Min ROI: " + str(CONFIG["min_roi"]) + "%")
+        print("Min Profit: Y" + str(CONFIG["min_profit"]))
+        self.discord.send_message(
+            "Resale Monitor Started\n"
+            + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            + " | ROI>=" + str(CONFIG["min_roi"])
+            + "% | Profit>=Y" + str(CONFIG["min_profit"])
+        )
+        await self.scraper.setup()
+        try:
+            while True:
+                await self._scan()
+                print("Waiting " + str(CONFIG["scan_interval"]) + "s...")
+                await asyncio.sleep(CONFIG["scan_interval"])
+        except KeyboardInterrupt:
+            print("Stopped")
+            self.discord.send_daily_summary(self.today_results)
+        finally:
+            await self.scraper.teardown()
+
+    async def _scan(self):
+        now = datetime.now().strftime("%H:%M:%S")
+        print("[" + now + "] Scanning...")
+        candidates = []
+        for kw in CONFIG["keywords"]:
+            products = await self.scraper.search(kw)
+            print("  [" + kw + "] " + str(len(products)) + " new items")
+            for p in products:
+                result = self.roi_engine.calculate(p)
+                if self.roi_engine.is_worth_notifying(result):
+                    candidates.append(result)
+        candidates.sort(key=lambda r: r.priority_score, reverse=True)
+        print("Candidates: " + str(len(candidates)))
+        for r in candidates:
+            sent = self.discord.send_alert(r)
+            if sent:
+                self.today_results.append(r)
+            if not self.discord.can_notify():
+                break
+
+
+if __name__ == "__main__":
+    asyncio.run(ResaleMonitor().run())
