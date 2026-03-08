@@ -1,5 +1,5 @@
 import os
-import asyncio
+import time
 import requests
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -42,6 +42,7 @@ MODEL_DATA = {
     "iPhone 11":         {"sell_price": 22000, "difficulty": 1.0},
     "DEFAULT":           {"sell_price": 15000, "difficulty": 1.0},
 }
+
 
 @dataclass
 class Product:
@@ -157,14 +158,14 @@ class DiscordNotifier:
             "color": self._color(result.roi),
             "url": p.url,
             "fields": [
-                {"name": "ROI",         "value": str(result.roi) + "%",         "inline": True},
-                {"name": "Profit",      "value": "Y" + str(result.profit),      "inline": True},
-                {"name": "Buy Price",   "value": "Y" + str(p.price),            "inline": True},
-                {"name": "Model",       "value": result.model_name,             "inline": True},
-                {"name": "Sell Est",    "value": "Y" + str(result.sell_price),  "inline": True},
-                {"name": "Repair Est",  "value": "Y" + str(result.repair_cost), "inline": True},
-                {"name": "Risk",        "value": result.risk_level,             "inline": True},
-                {"name": "Issues",      "value": ", ".join(result.issues),      "inline": False},
+                {"name": "ROI",        "value": str(result.roi) + "%",          "inline": True},
+                {"name": "Profit",     "value": "Y" + str(result.profit),       "inline": True},
+                {"name": "Buy Price",  "value": "Y" + str(p.price),             "inline": True},
+                {"name": "Model",      "value": result.model_name,              "inline": True},
+                {"name": "Sell Est",   "value": "Y" + str(result.sell_price),   "inline": True},
+                {"name": "Repair Est", "value": "Y" + str(result.repair_cost),  "inline": True},
+                {"name": "Risk",       "value": result.risk_level,              "inline": True},
+                {"name": "Issues",     "value": ", ".join(result.issues),       "inline": False},
             ],
             "footer": {"text": "Resale Monitor | " + datetime.now().strftime("%H:%M:%S")},
         }
@@ -229,5 +230,63 @@ class MercariAPI:
                 title = item.get("name", "")
                 thumbnail = item.get("thumbnails", [""])[0] if item.get("thumbnails") else ""
                 products.append(Product(
-                    id=pid,
-                    title=title,​​​​​​​​​​​​​​​​
+                    id=pid, title=title, price=price,
+                    url="https://jp.mercari.com/item/" + pid,
+                    thumbnail=thumbnail, posted_at=datetime.now(),
+                ))
+                self.seen_ids.add(pid)
+        except Exception as e:
+            print("Search error [" + label + "]: " + str(e))
+        return products
+
+
+class ResaleMonitor:
+    def __init__(self):
+        self.roi_engine = ROIEngine()
+        self.discord = DiscordNotifier(CONFIG["discord_webhook"])
+        self.api = MercariAPI()
+        self.today_results = []
+
+    def run(self):
+        print("Resale Monitor Starting...")
+        print("Interval: " + str(CONFIG["scan_interval"]) + "s")
+        print("Min ROI: " + str(CONFIG["min_roi"]) + "%")
+        self.discord.send_message(
+            "Resale Monitor Started\n"
+            + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            + " | ROI>=" + str(CONFIG["min_roi"])
+            + "% | Profit>=Y" + str(CONFIG["min_profit"])
+        )
+        while True:
+            try:
+                self._scan()
+            except Exception as e:
+                print("Scan error: " + str(e))
+            print("Waiting " + str(CONFIG["scan_interval"]) + "s...")
+            time.sleep(CONFIG["scan_interval"])
+
+    def _scan(self):
+        now = datetime.now().strftime("%H:%M:%S")
+        print("[" + now + "] Scanning...")
+        candidates = []
+        keywords = CONFIG["keywords"]
+        labels = CONFIG["keyword_labels"]
+        for i in range(len(keywords)):
+            products = self.api.search(keywords[i], labels[i])
+            print("  [" + labels[i] + "] " + str(len(products)) + " new items")
+            for p in products:
+                result = self.roi_engine.calculate(p)
+                if self.roi_engine.is_worth_notifying(result):
+                    candidates.append(result)
+        candidates.sort(key=lambda r: r.roi, reverse=True)
+        print("Candidates: " + str(len(candidates)))
+        for r in candidates:
+            sent = self.discord.send_alert(r)
+            if sent:
+                self.today_results.append(r)
+            if not self.discord.can_notify():
+                break
+
+
+if __name__ == "__main__":
+    ResaleMonitor().run()
