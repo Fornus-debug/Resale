@@ -198,9 +198,12 @@ class MercariScraper:
         products = []
         try:
             encoded = requests.utils.quote(keyword)
-            url = "https://mercari-searches.com/search?keyword=" + encoded + "&sort=created_time&order=desc&status=on_sale"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            url = "https://jp.mercari.com/search?keyword=" + encoded + "&status=on_sale&sort=created_time&order=desc"
+
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+"Accept-Language": "ja",
+"Accept": "text/html,application/xhtml+xml",
+eWebKit/605.1.15",
             }
             res = requests.get(url, headers=headers, timeout=15)
 
