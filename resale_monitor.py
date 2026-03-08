@@ -1,4 +1,4 @@
-import os
+おええimport os
 import asyncio
 import requests
 from datetime import datetime
@@ -389,4 +389,12 @@ class ResaleMonitor:
 
 
 if __name__ == "__main__":
-    asyncio.run(ResaleMonitor().run())
+    import sys
+    try:
+        asyncio.run(ResaleMonitor().run())
+    except Exception as e:
+        print("Fatal error: " + str(e))
+        import time
+        time.sleep(60)
+        sys.exit(1)
+
