@@ -2,9 +2,8 @@ FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY . .
 
-COPY resale_monitor.py .
+RUN pip install requests playwright python-dotenv
 
 CMD ["python", "resale_monitor.py"]
